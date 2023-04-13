@@ -1,0 +1,616 @@
+
+\begin{pyin}
+\## Import the required modules
+import torch
+from transformers import T5Tokenizer, T5ForConditionalGeneration
+
+# Load the FLAN-T5 large tokenizer and model
+tokenizer = T5Tokenizer.from_pretrained("google/flan-t5-xl")
+
+# Load & Move the model to GPU
+model = T5ForConditionalGeneration.from_pretrained("google/flan-t5-xl").to('cuda')
+\end{pyin}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 1. Load gold data
+% 2. Structure gold data in random order for few shot
+% 3. Few shot sentiment analysis with random order each time
+% 4. Save results as they're processed (save as json)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\begin{pyin}
+import json
+import random
+\end{pyin}
+
+\begin{pyin}
+\## Load the real instances
+with open('../data/all_windows.json', 'r') as f:
+    all_instances = json.load(f)
+\end{pyin}
+
+\begin{pyin}
+\## Load the gold data
+with open('../models/gold_new.json', 'r') as f:
+    gold_data = json.load(f)
+\end{pyin}
+
+\begin{pyin}
+\## Structure the gold data in random order for few shot (every time)
+training_instances = list(gold_data.values())
+\end{pyin}
+
+\begin{pyin}
+results = {}
+i = 0
+
+# Perform few-shot classification using each training set
+for instance_id, window in all_instances.items():
+    total_sentiments = {"positive": 0, "negative": 0, "neutral": 0}
+    num_training_sets = 0
+
+    # Randomly shuffle the gold data
+    random.shuffle(training_instances)
+
+    # Split the shuffled gold data into non-overlapping groups of 3 instances each
+    training_sets = [training_instances[i:i + 3] for i in range(0, len(training_instances), 3)]
+
+    for training_set in training_sets:
+        num_training_sets += 1
+
+        # Prepare the input string with training instances and the test instance
+        input_str = ''
+        for entry in training_set:
+            input_str += 'Classify as positive, negative, or neutral ' \
+                         'about climate policy: "' + str(entry['window']) + '"\n\n'
+
+        input_str += 'Classify as positive, negative, or neutral about climate policy: ' \
+                     '"{\'window\': \'' + window + '\', \'polarity\': '
+
+        # Tokenize the input text
+        # Move the input tensors to GPU
+        input_ids = tokenizer(input_str, return_tensors="pt").input_ids.to('cuda')
+
+        # Generate the prediction
+        outputs = model.generate(input_ids, max_new_tokens=3, num_beams=3, num_return_sequences=3,
+                                 return_dict_in_generate=True, output_scores=True)
+
+        # Extract the token ids and logits
+        output_token_ids = outputs.sequences
+        output_logits = outputs.scores
+
+        # Get the last logits for each return sequence
+        last_logits = [logits[-1] for logits in output_logits]
+
+        # Calculate the probability distribution for each last logit
+        probs = [torch.softmax(logits, dim=-1).squeeze() for logits in last_logits]
+
+        # Sentiments and their corresponding token ids
+        sentiments = ["positive", "negative", "neutral"]
+        sentiment_token_ids = [tokenizer.encode(sentiment)[0] for sentiment in sentiments]
+
+        # Extract the probabilities for each sentiment from the probability distributions
+        sentiment_probs = []
+        for prob in probs:
+            prob_values = []
+            for token_id in sentiment_token_ids:
+                try:
+                    prob_values.append(prob[token_id].item())
+                except IndexError:
+                    prob_values.append(0)
+            sentiment_probs.append(prob_values)
+
+        # Calculate the average sentiment probabilities and update the sentiments dictionary
+        sentiments = {sentiment: sum(sentiment_probs[i][j]
+                      for i in range(len(sentiment_probs))) / len(sentiment_probs)
+                      for j, sentiment in enumerate(sentiments)}
+
+       # Update the total_sentiments with the current training set's sentiment probabilities
+        for sentiment in sentiments.keys():
+            total_sentiments[sentiment] += sentiments[sentiment]
+
+    # Calculate the average sentiment probabilities for all training sets
+    average_sentiments = {sentiment: total_sentiments[sentiment] / num_training_sets
+                          for sentiment in total_sentiments.keys()}
+
+    # Append the result to the results list
+    results[instance_id] = {
+        'window': window,
+        'sentiment': average_sentiments
+    }
+
+    # Save the results as they are processed (write to JSON file)
+    with open('../data/all_windows_classified.json', 'w') as output_file:
+        json.dump(results, output_file, indent=4)
+
+    # Print progress
+    i += 1
+
+    if i % 10 == 0:
+        print(f"Processed {i} instances")
+
+print("Sentiment analysis completed.")
+\end{pyin}
+
+\begin{pyprint}
+Processed 10 iterations
+Processed 20 iterations
+Processed 30 iterations
+Processed 40 iterations
+Processed 50 iterations
+Processed 60 iterations
+Processed 70 iterations
+Processed 80 iterations
+Processed 90 iterations
+Processed 100 iterations
+Processed 110 iterations
+Processed 120 iterations
+Processed 130 iterations
+Processed 140 iterations
+Processed 150 iterations
+Processed 160 iterations
+Processed 170 iterations
+Processed 180 iterations
+Processed 190 iterations
+Processed 200 iterations
+Processed 210 iterations
+Processed 220 iterations
+Processed 230 iterations
+Processed 240 iterations
+Processed 250 iterations
+Processed 260 iterations
+Processed 270 iterations
+Processed 280 iterations
+Processed 290 iterations
+Processed 300 iterations
+Processed 310 iterations
+Processed 320 iterations
+Processed 330 iterations
+Processed 340 iterations
+Processed 350 iterations
+Processed 360 iterations
+Processed 370 iterations
+Processed 380 iterations
+Processed 390 iterations
+Processed 400 iterations
+Processed 410 iterations
+Processed 420 iterations
+Processed 430 iterations
+Processed 440 iterations
+Processed 450 iterations
+Processed 460 iterations
+Processed 470 iterations
+Processed 480 iterations
+Processed 490 iterations
+Processed 500 iterations
+Processed 510 iterations
+Processed 520 iterations
+Processed 530 iterations
+Processed 540 iterations
+Processed 550 iterations
+Processed 560 iterations
+Processed 570 iterations
+Processed 580 iterations
+Processed 590 iterations
+Processed 600 iterations
+Processed 610 iterations
+Processed 620 iterations
+Processed 630 iterations
+Processed 640 iterations
+Processed 650 iterations
+Processed 660 iterations
+Processed 670 iterations
+Processed 680 iterations
+Processed 690 iterations
+Processed 700 iterations
+Processed 710 iterations
+Processed 720 iterations
+Processed 730 iterations
+Processed 740 iterations
+Processed 750 iterations
+Processed 760 iterations
+Processed 770 iterations
+\end{pyprint}
+
+\begin{pyprint}
+Token indices sequence length is longer than the specified maximum sequence length for this model (527 > 512). Running this sequence through the model will result in indexing errors
+\end{pyprint}
+
+\begin{pyprint}
+Processed 780 iterations
+Processed 790 iterations
+Processed 800 iterations
+Processed 810 iterations
+Processed 820 iterations
+Processed 830 iterations
+Processed 840 iterations
+Processed 850 iterations
+Processed 860 iterations
+Processed 870 iterations
+Processed 880 iterations
+Processed 890 iterations
+Processed 900 iterations
+Processed 910 iterations
+Processed 920 iterations
+Processed 930 iterations
+Processed 940 iterations
+Processed 950 iterations
+Processed 960 iterations
+Processed 970 iterations
+Processed 980 iterations
+Processed 990 iterations
+Processed 1000 iterations
+Processed 1010 iterations
+Processed 1020 iterations
+Processed 1030 iterations
+Processed 1040 iterations
+Processed 1050 iterations
+Processed 1060 iterations
+Processed 1070 iterations
+Processed 1080 iterations
+Processed 1090 iterations
+Processed 1100 iterations
+Processed 1110 iterations
+Processed 1120 iterations
+Processed 1130 iterations
+Processed 1140 iterations
+Processed 1150 iterations
+Processed 1160 iterations
+Processed 1170 iterations
+Processed 1180 iterations
+Processed 1190 iterations
+Processed 1200 iterations
+Processed 1210 iterations
+Processed 1220 iterations
+Processed 1230 iterations
+Processed 1240 iterations
+Processed 1250 iterations
+Processed 1260 iterations
+Processed 1270 iterations
+Processed 1280 iterations
+Processed 1290 iterations
+Processed 1300 iterations
+Processed 1310 iterations
+Processed 1320 iterations
+Processed 1330 iterations
+Processed 1340 iterations
+Processed 1350 iterations
+Processed 1360 iterations
+Processed 1370 iterations
+Processed 1380 iterations
+Processed 1390 iterations
+Processed 1400 iterations
+Processed 1410 iterations
+Processed 1420 iterations
+Processed 1430 iterations
+Processed 1440 iterations
+Processed 1450 iterations
+Processed 1460 iterations
+Processed 1470 iterations
+Processed 1480 iterations
+Processed 1490 iterations
+Processed 1500 iterations
+Processed 1510 iterations
+Processed 1520 iterations
+Processed 1530 iterations
+Processed 1540 iterations
+Processed 1550 iterations
+Processed 1560 iterations
+Processed 1570 iterations
+Processed 1580 iterations
+Processed 1590 iterations
+Processed 1600 iterations
+Processed 1610 iterations
+Processed 1620 iterations
+Processed 1630 iterations
+Processed 1640 iterations
+Processed 1650 iterations
+Processed 1660 iterations
+Processed 1670 iterations
+Processed 1680 iterations
+Processed 1690 iterations
+Processed 1700 iterations
+Processed 1710 iterations
+Processed 1720 iterations
+Processed 1730 iterations
+Processed 1740 iterations
+Processed 1750 iterations
+Processed 1760 iterations
+Processed 1770 iterations
+Processed 1780 iterations
+Processed 1790 iterations
+Processed 1800 iterations
+Processed 1810 iterations
+Processed 1820 iterations
+Processed 1830 iterations
+Processed 1840 iterations
+Processed 1850 iterations
+Processed 1860 iterations
+Processed 1870 iterations
+Processed 1880 iterations
+Processed 1890 iterations
+Processed 1900 iterations
+Processed 1910 iterations
+Processed 1920 iterations
+Processed 1930 iterations
+Processed 1940 iterations
+Processed 1950 iterations
+Processed 1960 iterations
+Processed 1970 iterations
+Processed 1980 iterations
+Processed 1990 iterations
+Processed 2000 iterations
+Processed 2010 iterations
+Processed 2020 iterations
+Processed 2030 iterations
+Processed 2040 iterations
+Processed 2050 iterations
+Processed 2060 iterations
+Processed 2070 iterations
+Processed 2080 iterations
+Processed 2090 iterations
+Processed 2100 iterations
+Processed 2110 iterations
+Processed 2120 iterations
+Processed 2130 iterations
+Processed 2140 iterations
+Processed 2150 iterations
+Processed 2160 iterations
+Processed 2170 iterations
+Processed 2180 iterations
+Processed 2190 iterations
+Processed 2200 iterations
+Processed 2210 iterations
+Processed 2220 iterations
+Processed 2230 iterations
+Processed 2240 iterations
+Processed 2250 iterations
+Processed 2260 iterations
+Processed 2270 iterations
+Processed 2280 iterations
+Processed 2290 iterations
+Processed 2300 iterations
+Processed 2310 iterations
+Processed 2320 iterations
+Processed 2330 iterations
+Processed 2340 iterations
+Processed 2350 iterations
+Processed 2360 iterations
+Processed 2370 iterations
+Processed 2380 iterations
+Processed 2390 iterations
+Processed 2400 iterations
+Processed 2410 iterations
+Processed 2420 iterations
+Processed 2430 iterations
+Processed 2440 iterations
+Processed 2450 iterations
+Processed 2460 iterations
+Processed 2470 iterations
+Processed 2480 iterations
+Processed 2490 iterations
+Processed 2500 iterations
+Processed 2510 iterations
+Processed 2520 iterations
+Processed 2530 iterations
+Processed 2540 iterations
+Processed 2550 iterations
+Processed 2560 iterations
+Processed 2570 iterations
+Processed 2580 iterations
+Processed 2590 iterations
+Processed 2600 iterations
+Processed 2610 iterations
+Processed 2620 iterations
+Processed 2630 iterations
+Processed 2640 iterations
+Processed 2650 iterations
+Processed 2660 iterations
+Processed 2670 iterations
+Processed 2680 iterations
+Processed 2690 iterations
+Processed 2700 iterations
+Processed 2710 iterations
+Processed 2720 iterations
+Processed 2730 iterations
+Processed 2740 iterations
+Processed 2750 iterations
+Processed 2760 iterations
+Processed 2770 iterations
+Processed 2780 iterations
+Processed 2790 iterations
+Processed 2800 iterations
+Processed 2810 iterations
+Processed 2820 iterations
+Processed 2830 iterations
+Processed 2840 iterations
+Processed 2850 iterations
+Processed 2860 iterations
+Processed 2870 iterations
+Processed 2880 iterations
+Processed 2890 iterations
+Processed 2900 iterations
+Processed 2910 iterations
+Processed 2920 iterations
+Processed 2930 iterations
+Processed 2940 iterations
+Processed 2950 iterations
+Processed 2960 iterations
+Processed 2970 iterations
+Processed 2980 iterations
+Processed 2990 iterations
+Processed 3000 iterations
+Processed 3010 iterations
+Processed 3020 iterations
+Processed 3030 iterations
+Processed 3040 iterations
+Processed 3050 iterations
+Processed 3060 iterations
+Processed 3070 iterations
+Processed 3080 iterations
+Processed 3090 iterations
+Processed 3100 iterations
+Processed 3110 iterations
+Processed 3120 iterations
+Processed 3130 iterations
+Processed 3140 iterations
+Processed 3150 iterations
+Processed 3160 iterations
+Processed 3170 iterations
+Processed 3180 iterations
+Processed 3190 iterations
+Processed 3200 iterations
+Processed 3210 iterations
+Processed 3220 iterations
+Processed 3230 iterations
+Processed 3240 iterations
+Processed 3250 iterations
+Processed 3260 iterations
+Processed 3270 iterations
+Processed 3280 iterations
+Processed 3290 iterations
+Processed 3300 iterations
+Processed 3310 iterations
+Processed 3320 iterations
+Processed 3330 iterations
+Processed 3340 iterations
+Processed 3350 iterations
+Processed 3360 iterations
+Processed 3370 iterations
+Processed 3380 iterations
+Processed 3390 iterations
+Processed 3400 iterations
+Processed 3410 iterations
+Processed 3420 iterations
+Processed 3430 iterations
+Processed 3440 iterations
+Processed 3450 iterations
+Processed 3460 iterations
+Processed 3470 iterations
+Processed 3480 iterations
+Processed 3490 iterations
+Processed 3500 iterations
+Processed 3510 iterations
+Processed 3520 iterations
+Processed 3530 iterations
+Processed 3540 iterations
+Processed 3550 iterations
+Processed 3560 iterations
+Processed 3570 iterations
+Processed 3580 iterations
+Processed 3590 iterations
+Processed 3600 iterations
+Processed 3610 iterations
+Processed 3620 iterations
+Processed 3630 iterations
+Processed 3640 iterations
+Processed 3650 iterations
+Processed 3660 iterations
+Processed 3670 iterations
+Processed 3680 iterations
+Processed 3690 iterations
+Processed 3700 iterations
+Processed 3710 iterations
+Processed 3720 iterations
+Processed 3730 iterations
+Processed 3740 iterations
+Processed 3750 iterations
+Processed 3760 iterations
+Processed 3770 iterations
+Processed 3780 iterations
+Processed 3790 iterations
+Processed 3800 iterations
+Processed 3810 iterations
+Processed 3820 iterations
+Processed 3830 iterations
+Processed 3840 iterations
+Processed 3850 iterations
+Processed 3860 iterations
+Processed 3870 iterations
+Processed 3880 iterations
+Processed 3890 iterations
+Processed 3900 iterations
+Processed 3910 iterations
+Processed 3920 iterations
+Processed 3930 iterations
+Processed 3940 iterations
+Processed 3950 iterations
+Processed 3960 iterations
+Processed 3970 iterations
+Processed 3980 iterations
+Processed 3990 iterations
+Processed 4000 iterations
+Processed 4010 iterations
+Processed 4020 iterations
+Processed 4030 iterations
+Processed 4040 iterations
+Processed 4050 iterations
+Processed 4060 iterations
+Processed 4070 iterations
+Processed 4080 iterations
+Processed 4090 iterations
+Processed 4100 iterations
+Processed 4110 iterations
+Processed 4120 iterations
+Processed 4130 iterations
+Processed 4140 iterations
+Processed 4150 iterations
+Processed 4160 iterations
+Processed 4170 iterations
+Processed 4180 iterations
+Processed 4190 iterations
+Processed 4200 iterations
+Processed 4210 iterations
+Processed 4220 iterations
+Processed 4230 iterations
+Processed 4240 iterations
+Processed 4250 iterations
+Processed 4260 iterations
+Processed 4270 iterations
+Processed 4280 iterations
+Processed 4290 iterations
+Processed 4300 iterations
+Processed 4310 iterations
+Processed 4320 iterations
+Processed 4330 iterations
+Processed 4340 iterations
+Processed 4350 iterations
+Processed 4360 iterations
+Processed 4370 iterations
+Processed 4380 iterations
+Processed 4390 iterations
+Processed 4400 iterations
+Processed 4400 iterations
+Processed 4410 iterations
+Processed 4420 iterations
+Processed 4430 iterations
+Processed 4440 iterations
+Processed 4450 iterations
+Processed 4460 iterations
+Processed 4470 iterations
+Processed 4480 iterations
+Processed 4490 iterations
+Processed 4500 iterations
+Processed 4510 iterations
+Processed 4520 iterations
+Processed 4530 iterations
+Processed 4540 iterations
+Processed 4550 iterations
+Processed 4560 iterations
+Processed 4570 iterations
+Processed 4580 iterations
+Processed 4590 iterations
+Processed 4600 iterations
+Processed 4610 iterations
+Processed 4620 iterations
+Processed 4630 iterations
+Processed 4640 iterations
+Processed 4650 iterations
+Processed 4660 iterations
+Processed 4670 iterations
+Processed 4680 iterations
+Processed 4690 iterations
+Processed 4700 iterations
+Processed 4710 iterations
+Sentiment analysis completed.
+\end{pyprint}

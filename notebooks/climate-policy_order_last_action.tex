@@ -1,0 +1,149 @@
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\begin{pyin}
+import dotenv
+from datetime import datetime
+import json
+import os
+import sys
+from time import mktime
+\end{pyin}
+
+\begin{pyin}
+\## Get the absolute path to the parent directory (the root directory of your project)
+project_root = os.path.abspath(os.path.join(os.getcwd(), os.pardir))
+
+# Add the project root to sys.path
+sys.path.insert(0, project_root)
+
+# Use an absolute import to import CDGClient from the utils.cdg_client.cdg_client module
+from utils.cdg_client.cdg_client import CDGClient
+import congress
+
+
+loc_api_key = dotenv.get_key('../.env', 'LOC_API_KEY')
+pc_api_key = dotenv.get_key('../.env', 'CONGRESS_API_KEY')
+
+pc_client = congress.Congress(pc_api_key, cache='../.cache')
+loc_client = CDGClient(loc_api_key)
+\end{pyin}
+
+\begin{pyin}
+from tqdm import tqdm
+
+def loop_with_progress(iterable, desc="Processing items"):
+    return tqdm(iterable, desc=desc, dynamic_ncols=True, unit='item', position=0, leave=True)
+\end{pyin}
+
+\begin{pyin}
+\## load ../data/bill_data.json
+with open('../data/bill_data.json') as f:
+    bill_data = json.load(f)
+\end{pyin}
+
+\begin{pyin}
+def get_latest_action(bill_id):
+    bill = pc_client.bills.get(*bill_id.split('-'))
+    bill_type = bill['bill_type']
+    congress_num = bill['congress']
+    bill_num = bill['number'].split('.')[-1]
+    data, status_code = loc_client.get(f'bill/{congress_num}/{bill_type}/{bill_num}/actions')
+    assert status_code == 200
+
+    latest_action = None
+    latest_action_date = None
+    for action in data['actions']:
+        if action.get('actionCode') is None:
+            continue
+
+        # Parse YYYY-MM-DD date
+        date = action.get('actionDate', '1900-01-01')
+        time = action.get('actionTime', '00:00:00')
+        dt = datetime.strptime(date + ' ' + time,'%Y-%m-%d %H:%M:%S')
+
+        # Convert to Unix timestamp
+        timestamp = int(mktime(dt.timetuple()))
+
+        if latest_action_date is None or timestamp > latest_action_date:
+            latest_action_date = timestamp
+            latest_action = action
+
+    return latest_action.get('actionCode'), latest_action_date
+\end{pyin}
+
+\begin{pyin}
+\## Add latest action code and timestamp to bill_data
+for bill_id in loop_with_progress(bill_data.keys()):
+    if (bill_data[bill_id].get('last_action_code') is not None
+            and bill_data[bill_id].get('last_action_timestamp') is not None):
+        continue
+
+    action_code, timestamp = get_latest_action(bill_id)
+    bill_data[bill_id]['last_action_code'] = action_code
+    bill_data[bill_id]['last_action_timestamp'] = timestamp
+\end{pyin}
+
+\begin{pyprint}
+Processing items: 100%|██████████| 138/138 [00:00<00:00, 138174.73item/s]
+\end{pyprint}
+
+\begin{pyin}
+\## Build ordinal mapping of action codes
+action_codes = {}
+for bill_id in bill_data.keys():
+    if bill_data[bill_id].get('last_action_code') is None:
+        continue
+
+    action_code = bill_data[bill_id]['last_action_code']
+
+    # get index of first digit
+    i = 0
+    while not action_code[i].isdigit():
+        i += 1
+
+    action_codes[action_code] = action_code[i:]
+
+action_code_ordinal = sorted(set(action_codes.values()))
+action_ordinal = {action_code: i for i, action_code in enumerate(action_code_ordinal)}
+\end{pyin}
+
+\begin{pyin}
+import re
+
+pattern = r'[a-zA-Z]\d[a-zA-Z].*'
+
+manual_ordinal = {
+    'H8D': 0,
+    'H1B': 1,
+}
+
+for bill_id in bill_data.keys():
+    if not (action_code := bill_data[bill_id].get('last_action_code')) or re.search(pattern, action_code):
+        # manually classify bill
+        print('Manual ordinal classification required for Bill ID:', bill_id)
+        if action_code[:3] in manual_ordinal:
+            bill_data[bill_id]['last_action_ordinal'] = manual_ordinal[action_code[:3]]
+            print(f'Found match: {action_code}: {manual_ordinal[action_code[:3]]}')
+        continue
+
+    action_code_ordinal = action_codes[bill_data[bill_id]['last_action_code']]
+    ordinal = action_ordinal[action_code_ordinal]
+    bill_data[bill_id]['last_action_ordinal'] = ordinal
+\end{pyin}
+
+\begin{pyprint}
+Manual ordinal classification required for Bill ID: hr5296-117
+Found match: H8D000: 0
+Manual ordinal classification required for Bill ID: hr4373-117
+Found match: H1B000: 1
+Manual ordinal classification required for Bill ID: hr4720-117
+Found match: H8D000: 0
+\end{pyprint}
+
+\begin{pyin}
+\## save bill_data
+with open('../data/bill_data.json', 'w') as f:
+    json.dump(bill_data, f, indent=2)
+\end{pyin}

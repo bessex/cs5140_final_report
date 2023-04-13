@@ -1,0 +1,221 @@
+
+\begin{pyin}
+import concurrent.futures
+import threading
+import json
+import pandas as pd
+from urllib.parse import urlparse
+import requests
+from bs4 import BeautifulSoup
+from math import isnan
+import string
+\end{pyin}
+
+\begin{pyin}
+\## import bias csv
+bias = pd.read_csv('../models/allsides_data.csv')
+\end{pyin}
+
+\begin{pyin}
+source_name_dict = {}
+def get_source_name(url):
+    if url in source_name_dict:
+        return source_name_dict[url]
+
+    try:
+        response = requests.get(url, timeout=5)
+        soup = BeautifulSoup(response.content, 'html.parser')
+        title = soup.find("title").get_text()
+        source_name = title.split('-', 1)[0].strip()
+    except Exception as e:
+        source_name = ' '.join(urlparse(url).hostname.replace('www.', '').split('.')[:-1])
+
+    source_name_dict[url] = source_name.lower()
+
+    return source_name.lower()
+\end{pyin}
+
+\begin{pyin}
+def get_source_name_allsides(url):
+    # raise an error if the url is not an allsides url
+    if 'allsides.com' not in url:
+        raise ValueError('url must be an allsides url')
+
+    response = requests.get(url, timeout=5)
+    soup = BeautifulSoup(response.content, 'html.parser')
+
+    external_link = soup.find('a', class_='external-link')
+
+    if external_link:
+        return get_source_name(external_link['href'])
+    else:
+        raise ValueError('no external link found')
+\end{pyin}
+
+\begin{pyin}
+\## Build a dictionary of source names and the corresponding bias rating from allsides
+source_bias = {}
+\end{pyin}
+
+\begin{pyin}
+def process_row(row):
+    print(f'Processing {row["news_source"]} ({row.name+1}/{len(bias)}).')
+
+    try:
+        src_name = get_source_name_allsides(row['url'])
+    except Exception as e:
+        src_name = row['news_source'].lower()
+
+    rating = row['rating_num']
+    source_bias[src_name] = rating if not isnan(rating) else None
+
+    print(f'Finished ({row.name+1}/{len(bias)}).')
+    return src_name, row['rating_num']
+
+# do 5 requests in parallel
+with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+    # Submit each row to the executor and store the resulting futures
+    futures = {executor.submit(process_row, row): row for _, row in bias.iterrows()}
+
+    # Wait for all the tasks to complete
+    for future in concurrent.futures.as_completed(futures):
+        try:
+            future.result()
+        except Exception as e:
+            print(f'An error occurred: {e}')
+\end{pyin}
+
+\begin{pyin}
+\## dump as json
+with open('../models/source_bias.json', 'w') as f:
+    json.dump(source_bias, f, indent=4)
+\end{pyin}
+
+\begin{pyin}
+\## load source bias
+if source_bias == {}:
+    with open('../models/source_bias.json', 'r') as f:
+        source_bias = json.load(f)
+\end{pyin}
+
+\begin{pyin}
+def get_bias(source_name):
+    if source_name in source_bias:
+        return source_bias[source_name]
+    else:
+        sn_words = source_name.translate(str.maketrans('', '', string.punctuation)).split()
+        for key, bias in source_bias.items():
+            # remove punctuation
+            key_no_punct = key.translate(str.maketrans('', '', string.punctuation))
+            if all([word in key_no_punct for word in sn_words]) and bias is not None:
+                return bias
+        return None
+\end{pyin}
+
+\begin{pyin}
+\## now we load all the documents into memory and associate a bias rating if one exists
+with open('../data/documents_1.json', 'r') as f:
+    documents = json.load(f)
+
+with open('../data/documents_2.json', 'r') as f:
+    documents.extend(json.load(f))
+
+with open('../data/documents_3.json', 'r') as f:
+    documents.extend(json.load(f))
+
+counter_lock = threading.Lock()
+counter = 0
+
+# create documents dictionary for easy lookup and to remove duplicates
+documents_dict = {doc['document_id']: doc for doc in documents}
+
+def process_document(doc):
+    global counter
+
+    # get the source name from the url
+    source_name = get_source_name(doc['source']['home_page_url'])
+
+    # get the bias rating from the source_bias dictionary
+    bias_rating = get_bias(source_name)
+
+    # add bias rating (or None) to the document
+    doc['bias_rating'] = bias_rating
+
+    with counter_lock:
+        counter += 1
+        if counter % 1000 == 0 or counter == len(documents_dict):
+            print(f'Finished {counter}/{len(documents_dict)}')
+    return doc
+
+# do 5 requests in parallel
+with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+    # Submit each doc to the executor and store the resulting futures
+    futures = {executor.submit(process_document, doc): doc for doc in documents_dict.values()}
+
+    # Wait for all the tasks to complete
+    for future in concurrent.futures.as_completed(futures):
+        try:
+            future.result()
+        except Exception as e:
+            print(f'An error occurred: {e}')
+\end{pyin}
+
+\begin{pyprint}
+Finished 1000/43881
+Finished 2000/43881
+Finished 3000/43881
+Finished 4000/43881
+Finished 5000/43881
+Finished 6000/43881
+Finished 7000/43881
+Finished 8000/43881
+Finished 9000/43881
+Finished 10000/43881
+Finished 11000/43881
+Finished 12000/43881
+Finished 13000/43881
+Finished 14000/43881
+Finished 15000/43881
+Finished 16000/43881
+Finished 17000/43881
+Finished 18000/43881
+Finished 19000/43881
+Finished 20000/43881
+Finished 21000/43881
+Finished 22000/43881
+Finished 23000/43881
+Finished 24000/43881
+Finished 25000/43881
+Finished 26000/43881
+Finished 27000/43881
+Finished 28000/43881
+Finished 29000/43881
+Finished 30000/43881
+Finished 31000/43881
+Finished 32000/43881
+Finished 33000/43881
+Finished 34000/43881
+Finished 35000/43881
+Finished 36000/43881
+Finished 37000/43881
+Finished 38000/43881
+Finished 39000/43881
+\end{pyprint}
+
+\begin{pyprint}
+C:\Users\bessex\AppData\Local\mambaforge\envs\climate-policy\lib\site-packages\bs4\builder\__init__.py:545: XMLParsedAsHTMLWarning: It looks like you're parsing an XML document using an HTML parser. If this really is an HTML document (maybe it's XHTML?), you can ignore or filter this warning. If it's XML, you should know that using an XML parser will be more reliable. To parse this document as XML, make sure you have the lxml package installed, and pass the keyword argument `features="xml"` into the BeautifulSoup constructor.
+  warnings.warn(
+\end{pyprint}
+
+\begin{pyprint}
+Finished 40000/43881
+Finished 41000/43881
+Finished 42000/43881
+Finished 43000/43881
+Finished 43881/43881
+\end{pyprint}
+
+\begin{pyin}
+with open('../data/documents_bias.json', 'w') as f:
+    json.dump(documents_dict, f, indent=4)
+\end{pyin}

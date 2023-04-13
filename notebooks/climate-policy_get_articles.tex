@@ -1,0 +1,397 @@
+
+\begin{pyin}
+import aylien_news_api
+from aylien_news_api.rest import ApiException
+from pprint import pprint
+import copy
+import dotenv
+import json
+import os
+import time
+import requests
+\end{pyin}
+
+\begin{pyin}
+\## Configure API key authorization: app_id
+app_id = dotenv.get_key('../.env', 'AYLIEN_APP_ID')
+app_key = dotenv.get_key('../.env', 'AYLIEN_APP_KEY')
+endpoint = dotenv.get_key('../.env', 'AYLIEN_ENDPOINT')
+
+configuration = aylien_news_api.Configuration()
+configuration.api_key['X-AYLIEN-NewsAPI-Application-ID'] = app_id
+configuration.api_key['X-AYLIEN-NewsAPI-Application-Key'] = app_key
+configuration.host = endpoint
+\end{pyin}
+
+\begin{pyin}
+client = aylien_news_api.ApiClient(configuration)
+api_instance = aylien_news_api.DefaultApi(client)
+\end{pyin}
+
+\begin{pyin}
+\## Fetch stories using AYLIEN News API
+def fetch_stories_to_file(opts, append_to_file, limit=None):
+    response = None
+    fetched_stories = []
+    stories = None
+    RETRY_COUNT = 5
+    MAX_PER_PAGE = 100
+    retry = 0
+
+    def _end_of_file():
+        if append_to_file:
+            with open(append_to_file, 'rb+') as f:
+                # Remove trailing comma if present
+                f.seek(-2, os.SEEK_END)
+                if str(f.read(1), 'utf-8') == ',':
+                    print("Removing trailing comma.")
+                    f.seek(-1, os.SEEK_CUR)
+                    f.truncate()
+                    f.write(bytes('\n]\n', 'utf-8'))
+
+    if append_to_file and os.path.exists(append_to_file):
+        with open(append_to_file, 'r+') as f:
+            if (start := f.read(1)) == '[':
+                print("append_to non-empty.")
+            elif start:
+                print("append_to non-empty, but doesn't start with '['. Stopping.")
+                return fetched_stories
+            else:
+                print("append_to empty. Will overwrite")
+                f.write('[\n')
+
+        with open(append_to_file, 'rb+') as f:
+            f.seek(-2, os.SEEK_END)
+            final = str(f.read(1), 'utf-8')
+            f.seek(-1, os.SEEK_CUR)
+            if final == ']':
+                print("append_to ends with ']'. Removing.")
+                f.truncate()
+                f.write(bytes(',\n', 'utf-8'))
+            elif final == ',' or final == '[':
+                print("append_to ends with " + final + ". Will append to end.")
+            else:
+                print("append_to doesn't end with ',' or ']'. Check that it's valid JSON and that the file ends with newline. Stopping.")
+                return fetched_stories
+    elif append_to_file:
+        with open(append_to_file, 'w') as f:
+            print("append_to doesn't exist. Will create.")
+            f.write('[\n')
+
+    while stories is None or len(stories) == (opts.get('per_page') or MAX_PER_PAGE):
+        if limit and len(fetched_stories) >= limit:
+            print('Reached limit of %d stories' % limit)
+            print('Next page cursor: %s' % response.next_page_cursor or 'None')
+            _end_of_file()
+            return fetched_stories
+        try:
+            response = api_instance.list_stories(**opts)
+        except ApiException as e:
+            if e.status == 429:
+                if int(e.headers['x-ratelimit-volume-remaining']) == 0:
+                    reset = e.headers('x-ratelimit-volume-reset')
+                    print('Monthly rate limit exceeded. Wait until reset at %s' % reset)
+                    print('Next page cursor: %s' % response.next_page_cursor or 'None')
+                    _end_of_file()
+                    return fetched_stories
+                if int(e.headers['x-ratelimit-remaining']) == 0:
+                    print('1-Minute rate limit exceeded. Waiting 60 seconds...')
+                    time.sleep(60)
+                    continue
+            else:
+                print("Exception when calling DefaultApi->list_stories (see below)")
+                print("Retry %d/%d" % (retry, RETRY_COUNT))
+                print("Status: %d" % e.status)
+                print("Reason: %s" % e.reason)
+                if retry < RETRY_COUNT:
+                    print("Retrying in 10 seconds...")
+                    retry += 1
+                    time.sleep(10)
+                    continue
+                else:
+                    print("Giving up. Check end of file '%s' for partial results." % append_to_file)
+                    print('Next page cursor: %s' % response.next_page_cursor or 'None')
+                    _end_of_file()
+                    return fetched_stories
+
+        if append_to_file:
+            with open(append_to_file, 'a') as f:
+                for story in response.stories:
+                    sentiment_dict = {'body_polarity': story.sentiment.body.polarity if story.sentiment.body else None,
+                                      'body_score': story.sentiment.body.score if story.sentiment.body else None,
+                                      'title_polarity': story.sentiment.title.polarity if story.sentiment.title else None,
+                                      'title_score': story.sentiment.title.score if story.sentiment.title else None}
+
+                    source_dict = {
+                        'description': story.source.description if story.source else None,
+                        'discriminator': story.source.discriminator if story.source else None,
+                        'domain': story.source.domain if story.source else None,
+                        'home_page_url': story.source.home_page_url if story.source else None,
+                        'id': story.source.id if story.source else None,
+                        'links_in_count': story.source.links_in_count if story.source else None
+                    }
+
+                    story_dict = {'document_id': story.id, 'body': story.body, 'date': story.published_at.isoformat(),
+                                  'sentiment': sentiment_dict, 'source': source_dict}
+                    fetched_stories.append(story_dict)
+                    json.dump(story_dict, f, indent=4)
+                    f.write(',\n')
+
+        stories = response.stories
+        opts['cursor'] = response.next_page_cursor
+
+        print(f'Fetched {len(stories)} stories. Total: {len(fetched_stories)} so far.')
+
+    _end_of_file()
+    return fetched_stories
+
+# Alternate: Fetch stories using pure HTTP requests
+def fetch_news(api_id, api_key, opts):
+    base_url = 'https://api.aylien.com/news/stories'
+    headers = {
+        'X-AYLIEN-NewsAPI-Application-ID': api_id,
+        'X-AYLIEN-NewsAPI-Application-Key': api_key
+    }
+    params = {
+        'published_at.start': opts['published_at_start'],
+        'published_at.end': opts['published_at_end'],
+        # 'source_locations.country': ','.join(opts['source_locations_country']),
+        # 'language': ','.join(opts['language']),
+        'sort_by': opts['sort_by'],
+        # 'sort_direction': opts['sort_direction'],
+        'per_page': opts['per_page'],
+    }
+    if 'aql' in opts:
+        params['aql'] = opts['aql']
+    elif 'text' in opts:
+        params['text'] = opts['text']
+
+    response = requests.get(base_url, headers=headers, params=params)
+
+    if response.status_code == 200:
+        return response.json()
+    else:
+        print(f"Error when calling AYLIEN News API: {response.status_code}, {response.text}")
+        return None
+\end{pyin}
+
+\begin{pyin}
+def get_terms_from_bills(bills_file) -> list:
+    with open(bills_file, 'r') as f:
+        bills = json.load(f)
+
+    terms = []
+
+    for bill in bills.values():
+        terms.append(bill['short_title'])
+
+        # bill['bill_number'] might look like 'H.R.1' or 'S.312' but we want 'H.R. 1' or 'S. 312'
+        # if the bill number already has a space after the period, don't add another one
+        # we can rfind the first period and insert a space after it if necessary
+        bill_number = bill['bill_number']
+        dot_index = bill_number.rfind('.')
+        if bill_number[dot_index+1] != ' ':
+            bill_number = bill_number[:dot_index] + '. ' + bill_number[dot_index+1:]
+
+        terms.append(bill_number)
+
+        # sometimes it's even 'H.RES.' or 'S.RES.'--in these cases we should also
+        # add 'H. RES.', 'S. RES.', 'H.R.' and 'S.R.'
+        if 'RES.' in bill_number:
+            terms.append(bill_number.replace('RES.', 'R.'))
+            terms.append(bill_number.replace('RES.', ' RES.'))
+
+        # in theory there could be other cases, but we'll just add them manually if we find them
+
+        # TODO: for debugging only....
+        # bill_number_digits = bill_number.split(' ')[-1]
+        # terms.append(bill_number_digits)
+
+    return terms
+\end{pyin}
+
+\begin{pyin}
+\## generate AYLIEN Query Language (AQL, based on Lucene) query from keywords
+keywords_file = '../models/story_keywords.txt'
+with open(keywords_file, 'r') as f:
+    keywords = f.read().splitlines()
+
+climate_keywords_aql = 'text:(' + ' OR '.join([f'"{keyword}"' for keyword in keywords]) + ')'
+
+# generate AQL query from bill info
+bill_data_file = '../data/bill_data.json'
+bill_terms = get_terms_from_bills(bill_data_file)
+
+half = len(bill_terms) // 2
+
+bill_aql_1 = 'text:(' + ' OR '.join([f'"{term}"' for term in bill_terms[:half]]) + ')'
+bill_aql_2 = 'text:(' + ' OR '.join([f'"{term}"' for term in bill_terms[half:]]) + ')'
+
+# An attempt at a more targeted query
+bill_aql_3 = 'text:(' + ' OR '.join(f'"{term}"' for term in get_terms_from_bills(bill_data_file)) + ')'
+\end{pyin}
+
+\begin{pyin}
+\## set options
+opts_1 = {
+    'aql': bill_aql_1,
+    'published_at_start': 'NOW-27MONTH',
+    'published_at_end': 'NOW-1DAY',
+    'source_locations_country': ['US'],
+    'language': ['en'],
+    'sort_by': 'relevance',
+    # 'sort_direction': 'asc',
+    'per_page': 100,
+}
+
+opts_2 = copy.deepcopy(opts_1)
+opts_2['aql'] = bill_aql_2
+
+opts_3 = copy.deepcopy(opts_1)
+opts_3['aql'] = bill_aql_3
+\end{pyin}
+
+\begin{pyin}
+append_to_file = '../data/documents_2.json'
+limit = 10_000
+opts = opts_2
+# Note: Set the following manually if restarting kernel
+# opts['cursor'] = '*' # (for opts_1)
+# opts['cursor'] = '*' # (for opts_2)
+print(f'Fetching {limit} stories to file {append_to_file}. Starting at page {opts.get("cursor") or 0}...')
+fetched = fetch_stories_to_file(opts, append_to_file, limit)
+
+# Note: this may eventually result in a JSON file that is rather large;
+# in that case we'll need to use some iterative approach to process it (e.g. ijson)
+\end{pyin}
+
+\begin{pyprint}
+Fetching 10000 stories to file ../data/documents_2.json. Starting at page OC4yMzIyODU1LDM2MTg4NTE0Nzc=...
+append_to non-empty.
+append_to ends with ']'. Removing.
+Fetched 100 stories. Total: 100 so far.
+Fetched 100 stories. Total: 200 so far.
+Fetched 100 stories. Total: 300 so far.
+Fetched 100 stories. Total: 400 so far.
+Fetched 100 stories. Total: 500 so far.
+Fetched 100 stories. Total: 600 so far.
+Fetched 100 stories. Total: 700 so far.
+Fetched 100 stories. Total: 800 so far.
+Fetched 100 stories. Total: 900 so far.
+Fetched 100 stories. Total: 1000 so far.
+Fetched 100 stories. Total: 1100 so far.
+Fetched 100 stories. Total: 1200 so far.
+Fetched 100 stories. Total: 1300 so far.
+Fetched 100 stories. Total: 1400 so far.
+Fetched 100 stories. Total: 1500 so far.
+Fetched 100 stories. Total: 1600 so far.
+Fetched 100 stories. Total: 1700 so far.
+Fetched 100 stories. Total: 1800 so far.
+Fetched 100 stories. Total: 1900 so far.
+Fetched 100 stories. Total: 2000 so far.
+Fetched 100 stories. Total: 2100 so far.
+Fetched 100 stories. Total: 2200 so far.
+Fetched 100 stories. Total: 2300 so far.
+Fetched 100 stories. Total: 2400 so far.
+Fetched 100 stories. Total: 2500 so far.
+Fetched 100 stories. Total: 2600 so far.
+Fetched 100 stories. Total: 2700 so far.
+Fetched 100 stories. Total: 2800 so far.
+Fetched 100 stories. Total: 2900 so far.
+Fetched 100 stories. Total: 3000 so far.
+Fetched 100 stories. Total: 3100 so far.
+Fetched 100 stories. Total: 3200 so far.
+Fetched 100 stories. Total: 3300 so far.
+Fetched 100 stories. Total: 3400 so far.
+Fetched 100 stories. Total: 3500 so far.
+Fetched 100 stories. Total: 3600 so far.
+Fetched 100 stories. Total: 3700 so far.
+Fetched 100 stories. Total: 3800 so far.
+Fetched 100 stories. Total: 3900 so far.
+Fetched 100 stories. Total: 4000 so far.
+Fetched 100 stories. Total: 4100 so far.
+Fetched 100 stories. Total: 4200 so far.
+Fetched 100 stories. Total: 4300 so far.
+Fetched 100 stories. Total: 4400 so far.
+Fetched 100 stories. Total: 4500 so far.
+Fetched 100 stories. Total: 4600 so far.
+Fetched 100 stories. Total: 4700 so far.
+Fetched 100 stories. Total: 4800 so far.
+Fetched 100 stories. Total: 4900 so far.
+Fetched 100 stories. Total: 5000 so far.
+Fetched 100 stories. Total: 5100 so far.
+Fetched 100 stories. Total: 5200 so far.
+Fetched 100 stories. Total: 5300 so far.
+Fetched 100 stories. Total: 5400 so far.
+Fetched 100 stories. Total: 5500 so far.
+Fetched 100 stories. Total: 5600 so far.
+Fetched 100 stories. Total: 5700 so far.
+Fetched 100 stories. Total: 5800 so far.
+Fetched 100 stories. Total: 5900 so far.
+Fetched 100 stories. Total: 6000 so far.
+Fetched 100 stories. Total: 6100 so far.
+Fetched 100 stories. Total: 6200 so far.
+Fetched 100 stories. Total: 6300 so far.
+Fetched 100 stories. Total: 6400 so far.
+Fetched 100 stories. Total: 6500 so far.
+Fetched 100 stories. Total: 6600 so far.
+Fetched 100 stories. Total: 6700 so far.
+Fetched 100 stories. Total: 6800 so far.
+Fetched 100 stories. Total: 6900 so far.
+Fetched 100 stories. Total: 7000 so far.
+Fetched 100 stories. Total: 7100 so far.
+Fetched 100 stories. Total: 7200 so far.
+Fetched 100 stories. Total: 7300 so far.
+Fetched 100 stories. Total: 7400 so far.
+Fetched 100 stories. Total: 7500 so far.
+Fetched 100 stories. Total: 7600 so far.
+Fetched 100 stories. Total: 7700 so far.
+Fetched 100 stories. Total: 7800 so far.
+Fetched 100 stories. Total: 7900 so far.
+Fetched 100 stories. Total: 8000 so far.
+Fetched 100 stories. Total: 8100 so far.
+Fetched 100 stories. Total: 8200 so far.
+Fetched 100 stories. Total: 8300 so far.
+Fetched 100 stories. Total: 8400 so far.
+Fetched 100 stories. Total: 8500 so far.
+Fetched 100 stories. Total: 8600 so far.
+Fetched 100 stories. Total: 8700 so far.
+Fetched 100 stories. Total: 8800 so far.
+Fetched 100 stories. Total: 8900 so far.
+Fetched 100 stories. Total: 9000 so far.
+Fetched 100 stories. Total: 9100 so far.
+Fetched 100 stories. Total: 9200 so far.
+Fetched 100 stories. Total: 9300 so far.
+Fetched 100 stories. Total: 9400 so far.
+Fetched 100 stories. Total: 9500 so far.
+Fetched 100 stories. Total: 9600 so far.
+Fetched 100 stories. Total: 9700 so far.
+Fetched 100 stories. Total: 9800 so far.
+Fetched 100 stories. Total: 9900 so far.
+Fetched 100 stories. Total: 10000 so far.
+Reached limit of 10000 stories
+Next page cursor: Ny4zOTQyMzQ3LDMxODIzMjM4Njc=
+Removing trailing comma.
+\end{pyprint}
+
+\begin{pyin}
+opts['aql']
+\end{pyin}
+
+\begin{pyin}
+with open(append_to_file, 'r') as f:
+    stories = json.load(f)
+\end{pyin}
+
+\begin{pyin}
+len(stories)
+\end{pyin}
+
+\begin{pyin}
+documents = {story['document_id']: story for story in stories}
+len(documents)
+\end{pyin}
+
+\begin{pyin}
+
+\end{pyin}

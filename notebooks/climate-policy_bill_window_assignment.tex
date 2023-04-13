@@ -1,0 +1,197 @@
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Pull in document instances
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\begin{pyin}
+import json
+from spacy.lang.en import English
+\end{pyin}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% This returns a dictionary of bill ID matched with all possible english representations of the bill so we can match back the windows
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\begin{pyin}
+def get_bill_matching(bills_file) -> list:
+    with open(bills_file, 'r') as f:
+        bills = json.load(f)
+
+    terms = dict()
+
+    for bill_id, bill in bills.items():
+        bill_number = bill['bill_number']
+        bill_introduced = bill['introduced']
+        bill_last_action_date = bill['last_action_date']
+
+        terms[bill['short_title'].lower()] = {'bill_id': bill_id,
+                                      'introduced': bill_introduced,
+                                      'last_action_date': bill_last_action_date}
+
+        # bill['bill_number'] might look like 'H.R.1' or 'S.312' but we want 'H.R. 1' or 'S. 312'
+        # if the bill number already has a space after the period, don't add another one
+        # we can rfind the first period and insert a space after it if necessary
+
+        dot_index = bill_number.rfind('.')
+        if bill_number[dot_index+1] != ' ':
+            bill_number = bill_number[:dot_index] + '. ' + bill_number[dot_index+1:]
+
+        terms[bill_number.lower()] = {'bill_id': bill_id,
+                                      'introduced': bill_introduced,
+                                      'last_action_date': bill_last_action_date}
+
+        # sometimes it's even 'H.RES.' or 'S.RES.'--in these cases we should also
+        # add 'H. RES.', 'S. RES.', 'H.R.' and 'S.R.'
+        if 'RES.' in bill_number:
+            terms[bill_number.replace('RES.', 'R.').lower()] = {'bill_id': bill_id,
+                                                        'introduced': bill_introduced,
+                                                        'last_action_date': bill_last_action_date}
+            terms[bill_number.replace('RES.', ' RES.').lower()] = {'bill_id': bill_id,
+                                                            'introduced': bill_introduced,
+                                                            'last_action_date': bill_last_action_date}
+
+        # in theory there could be other cases, but we'll just add them manually if we find them
+
+        # TODO: for debugging only....
+        # bill_number_digits = bill_number.split(' ')[-1]
+        # terms.append(bill_number_digits)
+
+    return terms
+\end{pyin}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\begin{pyin}
+def match_instance_to_bill_and_year(instance_file, matching_terms):
+    with open(instance_file, 'r') as f:
+        instances = json.load(f)
+
+    matchings = dict()
+
+    for instance in instances:
+        instance_id = instance['instance_id']
+        term = instance['match']
+
+        result = {'bill_id': matching_terms[term]['bill_id'],
+                  'introduced': matching_terms[term]['introduced'],
+                  'last_action_date': matching_terms[term]['last_action_date']}
+
+        matchings[instance_id] = result
+
+    return matchings
+\end{pyin}
+
+\begin{pyin}
+def match_windows_to_bills(bills_file, matching_instances, window_date_file):
+    with open(bills_file, 'r') as f:
+        bills = json.load(f)
+
+    with open(window_date_file, 'r') as f:
+        date_matching = json.load(f)
+
+    bill_matchings = dict()
+
+    for bill_key in bills:
+        bill = bills[bill_key]
+        bill_id = bill['bill_id']
+        bill_date = bill['last_action_date']
+
+        bill_windows = []
+
+        # Loop through each matching instance and check if it matches this bill's ID
+        for window_key in matching_instances:
+            match_day = date_matching[window_key]
+            if matching_instances[window_key]['bill_id'] == bill_id and date_matching[window_key] <= bill_date:  # check to see if the window is a match and the instance occured before the bill date
+                bill_windows.append(window_key)
+
+
+        # Add the list of matching window keys to the bill_matchings dictionary using the bill_key as the key
+        bill_matchings[bill_key] = bill_windows
+
+    with open('../data/bill_window_matching.json', 'w') as f:
+        json.dump(bill_matchings, f)
+\end{pyin}
+
+\begin{pyin}
+def match_window_to_date(instance_file, document_file):
+    with open(document_file, 'r') as f:
+        document = json.load(f)
+
+    with open(instance_file, 'r') as f:
+        instances = json.load(f)
+
+    window_to_date = {}
+
+    for instance in instances:
+        document_id = str(instance['document_id'])
+        instance_id = instance['instance_id']
+
+        article_date = document[document_id]['date']
+        window_to_date[instance_id] = article_date
+
+    with open('../data/window_date_matching.json', 'w') as f:
+        json.dump(window_to_date, f)
+\end{pyin}
+
+\begin{pyin}
+bills_file = '../data/bill_data.json'
+
+
+nlp = English()
+tokenizer = nlp.tokenizer
+
+# Get all matching terms
+matching_terms = get_bill_matching(bills_file)
+
+# match back on windows
+instances_file = '../data/all_instances.json'
+matching_instances = match_instance_to_bill_and_year(instances_file, matching_terms)
+
+with open(instances_file) as f:
+    inst_json = json.load(f)
+
+match_inst_json = {}
+for inst in inst_json:
+    bill_match = None
+    if inst['instance_id'] in matching_instances:
+        bill_match = matching_instances[inst['instance_id']]['bill_id']
+    inst['bill_id'] = bill_match
+    inst_id = inst['instance_id']
+    # remove the instance_id from the instance
+    del inst['instance_id']
+    match_inst_json[inst_id] = inst
+\end{pyin}
+
+\begin{pyin}
+insts_with_bill_file = '../data/all_instances_with_bill.json'
+with open(insts_with_bill_file, 'w') as f:
+    json.dump(match_inst_json, f, indent=2)
+\end{pyin}
+
+\begin{pyin}
+bills_file = '../data/bill_data.json'
+
+
+nlp = English()
+tokenizer = nlp.tokenizer
+
+# Get all matching terms
+matching_terms = get_bill_matching(bills_file)
+
+# match back on windows
+instances_file = '../data/all_instances.json'
+matching_instances = match_instance_to_bill_and_year(instances_file, matching_terms)
+
+
+window_date = '../data/window_date_matching.json'
+bill_matchings = match_windows_to_bills(bills_file, matching_instances, window_date)
+
+# This code will dump the matching of windows to dates. run once.
+document_file = '../data/documents_bias.json'
+
+# match_window_to_date(instances_file, document_file)
+
+window_date_file = '../data/window_date_matching.json'
+match_windows_to_bills(bills_file, matching_instances, window_date_file)
+\end{pyin}

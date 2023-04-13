@@ -1,0 +1,267 @@
+
+\begin{pyin}
+import congress
+import datetime
+import dotenv
+import json
+import time
+from urllib.parse import urlencode
+\end{pyin}
+
+\begin{pyin}
+api_key = dotenv.get_key('../.env', 'CONGRESS_API_KEY')
+\end{pyin}
+
+\begin{pyin}
+c = congress.Congress(api_key)
+\end{pyin}
+
+\begin{pyin}
+def convert_to_bill_id(bill_number):
+    bill_id = bill_number.lower()
+    bill_id = bill_id.replace(' ', '')
+    bill_id = bill_id.replace('.', '')
+    return bill_id
+\end{pyin}
+
+\begin{pyin}
+def get_related_subjects(keyword_filename):
+    # create list of subject queries from ../models/story_keywords.txt
+    with open(keyword_filename, 'r') as f:
+        keywords = f.read().splitlines()
+
+    # get subjects related to climate
+    subjects = set()
+
+    for keyword in keywords:
+        query = urlencode({'query': keyword.lower()})
+        kw_subjects = c.fetch('bills/subjects/search.json?' + query)['subjects']
+        for subj in kw_subjects:
+            if subj['has_bills'] == 'true':
+                subjects.add(subj['url_name'])
+
+    return subjects
+\end{pyin}
+
+\begin{pyin}
+def bills_for_subjects(subjects, logging=False):
+    bills = {}
+    for subject in subjects:
+        if logging:
+            print('Getting bills for subject: ' + subject + '...', end=' ')
+        fetched_bills = c.fetch('bills/subjects/' + subject + '.json', parse=lambda r: r['results'])
+        if logging:
+            print('%d bills found.' % len(fetched_bills))
+        for b in fetched_bills:
+            bills[b['bill_id']] = b
+    return bills
+\end{pyin}
+
+\begin{pyin}
+subjects = get_related_subjects(keyword_filename='../models/bill_keywords.txt')
+\end{pyin}
+
+\begin{pyin}
+\## Save bill subjects
+with open('../data/bill_subjects.txt', 'w') as f:
+    for subj in subjects:
+        f.write(subj + '\n')
+\end{pyin}
+
+\begin{pyin}
+bills = bills_for_subjects(subjects)
+\end{pyin}
+
+\begin{pyin}
+\## Set bill last action cutoff date
+# 27 months is the maximum reachback we can do with the AYLIEN API
+now = datetime.datetime.now()
+cutoff_month = now.month - 3
+cutoff_day = now.day
+cutoff_year = now.year - 2
+
+if cutoff_month <= 0:
+    cutoff_month += 12
+    cutoff_year -= 1
+
+cutoff_date = datetime.datetime(cutoff_year, cutoff_month, cutoff_day)
+\end{pyin}
+
+\begin{pyin}
+\## Remove all bills whose last action was earlier than the cutoff
+recent_bills = {}
+for bill_id, bill in bills.items():
+    last_action_date = datetime.datetime.strptime(bill['latest_major_action_date'], '%Y-%m-%d')
+    if last_action_date >= cutoff_date:
+        recent_bills[bill_id] = bill
+\end{pyin}
+
+\begin{pyin}
+\## Save bill ids
+with open('../data/bill_ids.txt', 'w') as f:
+    for bill_id in recent_bills.keys():
+        f.write(bill_id + '\n')
+\end{pyin}
+
+\begin{pyin}
+def get_latest_vote(bill):
+    latest_house_roll_call = 0
+    house_api_url = None
+    latest_senate_roll_call = 0
+    senate_api_url = None
+
+    for vote in bill['votes']:
+        if vote['chamber'] == 'House':
+            if int(vote['roll_call']) > latest_house_roll_call:
+                latest_house_roll_call = int(vote['roll_call'])
+                house_api_url = vote['api_url']
+        elif vote['chamber'] == 'Senate':
+            if int(vote['roll_call']) > latest_senate_roll_call:
+                latest_senate_roll_call = int(vote['roll_call'])
+                senate_api_url = vote['api_url']
+
+    house = None
+    senate = None
+
+    if house_api_url:
+        house_api_uri = house_api_url.split('https://api.propublica.org/congress/v1/')[1]
+        house = c.fetch(house_api_uri, parse=lambda r: r['results']['votes']['vote'])
+
+    if senate_api_url:
+        senate_api_uri = senate_api_url.split('https://api.propublica.org/congress/v1/')[1]
+        senate = c.fetch(senate_api_uri, parse=lambda r: r['results']['votes']['vote'])
+
+    return house, senate
+\end{pyin}
+
+\begin{pyin}
+\## Restructure for the data pipeline
+# Our schema is the following:
+# {
+#   <bill_id>: {
+#     'bill_id': <bill_id> (str),
+#     'congress': <congress> (int)
+#     'bill_number': <bill_number> (str),
+#     'short_title': <short_title> (str),
+#     'introduced': <introduced_date> (str),
+#     'last_action': <last_action> (str),
+#     'last_action_date': <last_action_date> (str),
+#     'house_vote': {
+#       'date': <date> (str),
+#       'passed': <result> (bool),
+#       'total_proportion': <proportion_of_total> (float),
+#       'democrats': <proportion_of_democrats> (float),
+#       'republicans': <proportion_of_republicans> (float),
+#       'independents': <proportion_of_independents> (float),
+#     },
+#     'senate_vote': {
+#       'date': <date> (str),
+#       'passed': <result> (bool),
+#       'total_proportion': <proportion_of_total> (float),
+#       'democrats': <proportion_of_democrats> (float),
+#       'republicans': <proportion_of_republicans> (float),
+#       'independents': <proportion_of_independents> (float)
+#     }
+#   }
+# }
+# Note: the schema uses strings for dates since datetime objects are not JSON serializable
+def get_bill_restruct(bill_id, bill):
+    bill_r = {
+        'bill_id': bill_id.split('-')[0],
+        'congress': int(bill_id.split('-')[1]),
+        'bill_number': bill['number'],
+        'short_title': bill['short_title'],
+        # 'introduced': datetime.datetime.strptime(bill['introduced_date'], '%Y-%m-%d'),
+        'introduced': bill['introduced_date'],
+        'last_action': bill['latest_major_action'],
+        # 'last_action_date': datetime.datetime.strptime(bill['latest_major_action_date'], '%Y-%m-%d'),
+        'last_action_date': bill['latest_major_action_date'],
+        'house_vote': {},
+        'senate_vote': {}
+    }
+
+    if not bill['votes']:
+        return bill_r
+
+    house_vote, senate_vote = get_latest_vote(bill)
+
+    if house_vote:
+        house_passed = house_vote['result'] == 'Passed'
+
+        house_dems_yes = house_vote['democratic']['yes']
+        house_dems_no = house_vote['democratic']['no']
+        all_house_dems = house_dems_yes + house_dems_no
+
+        house_reps_yes = house_vote['republican']['yes']
+        house_reps_no = house_vote['republican']['no']
+        all_house_reps = house_reps_yes + house_reps_no
+
+        house_ind_yes = house_vote['independent']['yes']
+        house_ind_no = house_vote['independent']['no']
+        all_house_ind = house_ind_yes + house_ind_no
+
+        bill_r['house_vote'] = {
+            # 'date': datetime.datetime.strptime(house_vote['date'], '%Y-%m-%d'),
+            'date': house_vote['date'],
+            'passed': house_passed,
+            'total_proportion': ((house_dems_yes + house_reps_yes + house_ind_yes) / (all_house_dems + all_house_reps + all_house_ind)) if (all_house_dems + all_house_reps + all_house_ind) > 0 else None,
+            'democrats': (house_dems_yes / all_house_dems) if all_house_dems > 0 else None,
+            'republicans': (house_reps_yes / all_house_reps) if all_house_reps > 0 else None,
+            'independents': (house_ind_yes / all_house_ind) if all_house_ind > 0 else None,
+        }
+
+    if senate_vote:
+        senate_passed = senate_vote['result'] == 'Passed'
+
+        senate_dems_yes = senate_vote['democratic']['yes']
+        senate_dems_no = senate_vote['democratic']['no']
+        all_senate_dems = senate_dems_yes + senate_dems_no
+
+        senate_reps_yes = senate_vote['republican']['yes']
+        senate_reps_no = senate_vote['republican']['no']
+        all_senate_reps = senate_reps_yes + senate_reps_no
+
+        senate_ind_yes = senate_vote['independent']['yes']
+        senate_ind_no = senate_vote['independent']['no']
+        all_senate_ind = senate_ind_yes + senate_ind_no
+
+        bill_r['senate_vote'] = {
+            # 'date': datetime.datetime.strptime(senate_vote['date'], '%Y-%m-%d'),
+            'date': senate_vote['date'],
+            'passed': senate_passed,
+            'total_proportion': ((senate_dems_yes + senate_reps_yes + senate_ind_yes) / (all_senate_dems + all_senate_reps + all_senate_ind)) if (all_senate_dems + all_senate_reps + all_senate_ind) > 0 else None,
+            'democrats': (senate_dems_yes / all_senate_dems) if all_senate_dems > 0 else None,
+            'republicans': (senate_reps_yes / all_senate_reps) if all_senate_reps > 0 else None,
+            'independents': (senate_ind_yes / all_senate_ind) if all_senate_ind > 0 else None
+        }
+
+    return bill_r
+\end{pyin}
+
+\begin{pyin}
+bills_restruct = {}
+
+# this is to resume in case an issue occurs
+retry_count = 0
+MAX_RETRIES = 5
+
+while retry_count < MAX_RETRIES:
+    try:
+        for bill_id, _ in recent_bills.items():
+            if bill_id in bills_restruct:
+                continue
+            bill = c.bills.get(*bill_id.split('-'))
+            bills_restruct[bill_id] = get_bill_restruct(bill_id, bill)
+        break
+    except Exception as e:
+        print(e)
+        retry_count += 1
+        print(f'Error occurred, retry {retry_count} of {MAX_RETRIES}...')
+        time.sleep(5)
+\end{pyin}
+
+\begin{pyin}
+\## write entire bill data to file
+with open('../data/bill_data.json', 'w') as f:
+    json.dump(bills_restruct, f, indent=2)
+\end{pyin}

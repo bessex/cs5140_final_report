@@ -1,0 +1,295 @@
+
+\begin{pyin}
+import aylien_news_api
+from aylien_news_api.rest import ApiException
+from pprint import pprint
+import copy
+import dotenv
+import json
+import os
+import requests
+from spacy.tokenizer import Tokenizer
+from spacy.lang.en import English
+import time
+from typing import Tuple
+\end{pyin}
+
+\begin{pyin}
+def begin_json_array_in_file(file_path: str) -> bool:
+    if os.path.exists(file_path):
+        with open(file_path, 'r+') as f:
+            if (start := f.read(1)) == '[':
+                print("file_path non-empty.")
+            elif start:
+                print("file_path non-empty, but doesn't start with '['. Stopping.")
+                return False
+            else:
+                print("file_path empty. Will overwrite")
+                f.write('[\n')
+
+        with open(file_path, 'rb+') as f:
+            f.seek(-2, os.SEEK_END)
+            final = str(f.read(1), 'utf-8')
+            f.seek(-1, os.SEEK_CUR)
+            if final == ']':
+                print("file_path ends with ']'. Removing.")
+                f.truncate()
+                f.write(bytes(',\n', 'utf-8'))
+            elif final == ',' or final == '[':
+                print("file_path ends with " + final + ". Will append to end.")
+            else:
+                print("file_path doesn't end with ',' or ']'. Check that it's valid JSON and that the file ends with newline. Stopping.")
+                return False
+    else:
+        with open(file_path, 'w') as f:
+            print("file_path doesn't exist. Will create.")
+            f.write('[\n')
+\end{pyin}
+
+\begin{pyin}
+def end_json_array_in_file(file_path: str):
+    with open(file_path, 'rb+') as f:
+        # Remove trailing comma if present
+        f.seek(-2, os.SEEK_END)
+        if str(f.read(1), 'utf-8') == ',':
+            print("Removing trailing comma.")
+            f.seek(-1, os.SEEK_CUR)
+            f.truncate()
+            f.write(bytes('\n]\n', 'utf-8'))
+\end{pyin}
+
+\begin{pyin}
+def match_terms(documents: dict, instances_file: str, terms: list, logging=False, processed=None) -> Tuple[set, list]:
+    if not processed:
+        processed = set()
+
+    if logging:
+        print('Loading spacy model...', end=' ')
+
+    nlp = English()
+    tokenizer = nlp.tokenizer
+
+    if logging:
+        print('done')
+
+    ##############################
+
+    if logging:
+        print('Pre-processing k-grams...', end=' ')
+
+    # Preprocess the k-grams and create a dictionary that maps each unique starting token
+    # to the set of k-grams that contain that token
+    # The purpose of this is to speed up the matching process
+    k_grams_dict = {}
+    k_grams_tokens = {}
+    for k_gram in terms:
+        k_gram_lower = k_gram.lower()
+        k_gram_tokens = tokenizer(k_gram_lower)
+        start_token = k_gram_tokens[0].text
+        if start_token not in k_grams_dict:
+            k_grams_dict[start_token] = set()
+        k_grams_dict[start_token].add(k_gram_lower)
+        k_grams_tokens[k_gram_lower] = k_gram_tokens
+
+    if logging:
+        print('done')
+
+    ##############################
+
+    begin_json_array_in_file(instances_file)
+
+    ##############################
+
+    # instance schema:
+    # {
+    #     "document_id": "document_id",
+    #     "instance_id": "instance_id",
+    #     "match": "match",
+    #     "start": "start",
+    #     "end": "end"
+    # }
+    # Note that start is inclusive and end is exclusive,
+    # and indexing is 0-based on tokens (not characters)
+
+    all_instances = []
+    num_documents_processed = 0
+
+    for document_id, document in documents.items():
+        doc_instances = []
+
+        if document_id in processed:
+            continue
+
+        if logging:
+            print(f'Processing document {document_id}...', end=' ')
+
+        # Preprocess the document
+        doc_tokens = tokenizer(document['body'].lower())
+
+        # Iterate over the tokens in the document
+        for i, token in enumerate(doc_tokens):
+            # If the token is in the dictionary of k-grams
+            if token.text in k_grams_dict:
+                for k_gram in k_grams_dict[token.text]:
+                    if i+len(k_grams_tokens[k_gram]) > len(doc_tokens):
+                        # TODO: watch for off-by-one error here
+                        continue
+
+                    # Check if the k-gram matches the document
+                    k_gram_tokens = k_grams_tokens[k_gram]
+                    if not all(doc_tokens[i+j].text == k_gram_tokens[j].text for j, _ in enumerate(k_gram_tokens)):
+                        continue
+
+                    # If the k-gram matches, add an instance
+                    instance = {
+                        'document_id': document_id,
+                        'instance_id': f'{document_id}_{len(doc_instances)}',
+                        'match': k_gram,
+                        'start': i,
+                        'end': i+len(k_gram_tokens)
+                    }
+
+                    doc_instances.append(instance)
+
+        all_instances.extend(doc_instances)
+
+        with open(instances_file, 'a') as f:
+            for instance in doc_instances:
+                f.write(json.dumps(instance) + ',\n')
+
+        num_documents_processed += 1
+        processed.add(document_id)
+
+        if logging:
+            print('done (%d/%d)' % (num_documents_processed, len(documents)))
+            print(f'Found {len(doc_instances)} instances.')
+
+    end_json_array_in_file(instances_file)
+    print(f'Found {len(all_instances)} instances in total.')
+
+    return processed, all_instances
+\end{pyin}
+
+\begin{pyin}
+def get_terms_from_bills(bills_file) -> list:
+    with open(bills_file, 'r') as f:
+        bills = json.load(f)
+
+    terms = []
+
+    for bill in bills.values():
+        terms.append(bill['short_title'])
+
+        # bill['bill_number'] might look like 'H.R.1' or 'S.312' but we want 'H.R. 1' or 'S. 312'
+        # if the bill number already has a space after the period, don't add another one
+        # we can rfind the first period and insert a space after it if necessary
+        bill_number = bill['bill_number']
+        dot_index = bill_number.rfind('.')
+        if bill_number[dot_index+1] != ' ':
+            bill_number = bill_number[:dot_index] + '. ' + bill_number[dot_index+1:]
+
+        terms.append(bill_number)
+
+        # sometimes it's even 'H.RES.' or 'S.RES.'--in these cases we should also
+        # add 'H. RES.', 'S. RES.', 'H.R.' and 'S.R.'
+        if 'RES.' in bill_number:
+            terms.append(bill_number.replace('RES.', 'R.'))
+            terms.append(bill_number.replace('RES.', ' RES.'))
+
+        # in theory there could be other cases, but we'll just add them manually if we find them
+
+        # TODO: for debugging only....
+        # bill_number_digits = bill_number.split(' ')[-1]
+        # terms.append(bill_number_digits)
+
+    return terms
+\end{pyin}
+
+\begin{pyin}
+instances_file = '../data/all_instances.json'
+bills_file = '../data/bill_data.json'
+
+terms = get_terms_from_bills(bills_file)
+\end{pyin}
+
+\begin{pyin}
+print('Loading documents...', end=' ')
+
+with open('../data/documents_1.json', 'r') as f:
+    stories_1 = json.load(f)
+
+with open('../data/documents_2.json', 'r') as f:
+    stories_2 = json.load(f)
+
+with open('../data/documents_3.json', 'r') as f:
+    stories_3 = json.load(f)
+
+stories = stories_1 + stories_2 + stories_3
+
+documents = {story['document_id']: story for story in stories}
+
+print('done')
+\end{pyin}
+
+\begin{pyprint}
+Loading documents...
+\end{pyprint}
+
+\begin{pyprint}
+---------------------------------------------------------------------------
+FileNotFoundError                         Traceback (most recent call last)
+Cell In[10], line 3
+      1 print('Loading documents...', end=' ')
+----> 3 with open('../data/documents_1.json', 'r') as f:
+      4     stories_1 = json.load(f)
+      6 with open('../data/documents_2.json', 'r') as f:
+
+File ~/miniforge3/envs/climate-policy/lib/python3.10/site-packages/IPython/core/interactiveshell.py:282, in _modified_open(file, *args, **kwargs)
+    275 if file in {0, 1, 2}:
+    276     raise ValueError(
+    277         f"IPython won't let you open fd={file} by default "
+    278         "as it is likely to crash IPython. If you know what you are doing, "
+    279         "you can use builtins' open."
+    280     )
+--> 282 return io_open(file, *args, **kwargs)
+
+FileNotFoundError: [Errno 2] No such file or directory: '../data/documents_1.json'
+\end{pyprint}
+
+\begin{pyin}
+processed, instances = match_terms(documents, instances_file, terms, logging=True)
+\end{pyin}
+
+\begin{pyprint}
+---------------------------------------------------------------------------
+NameError                                 Traceback (most recent call last)
+Cell In[9], line 1
+----> 1 processed, instances = match_terms(documents, instances_file, terms, logging=True)
+
+NameError: name 'documents' is not defined
+\end{pyprint}
+
+\begin{pyin}
+nlp = English()
+tokenizer = nlp.tokenizer
+print(instances[0]['match'])
+print(tokenizer(instances[0]['match']))
+print(tokenizer(documents[instances[0]['document_id']]['body'])[instances[0]['start']:instances[0]['end']])
+\end{pyin}
+
+\begin{pyprint}
+---------------------------------------------------------------------------
+NameError                                 Traceback (most recent call last)
+Cell In[4], line 3
+      1 nlp = English()
+      2 tokenizer = nlp.tokenizer
+----> 3 print(instances[0]['match'])
+      4 print(tokenizer(instances[0]['match']))
+      5 print(tokenizer(documents[instances[0]['document_id']]['body'])[instances[0]['start']:instances[0]['end']])
+
+NameError: name 'instances' is not defined
+\end{pyprint}
+
+\begin{pyin}
+
+\end{pyin}
